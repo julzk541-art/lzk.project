@@ -25,4 +25,18 @@ export async function downloadExcel(params) {
   URL.revokeObjectURL(url);
 }
 
+export async function downloadImportTemplate() {
+  const response = await api.get('/admin/import-template', { responseType: 'blob' });
+  const disposition = response.headers['content-disposition'] || '';
+  const match = disposition.match(/filename="?([^";]+)"?/);
+  const fileName = match?.[1] || '优秀生导入模板.xlsx';
+  const blob = new Blob([response.data], { type: response.headers['content-type'] });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = decodeURIComponent(fileName);
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export default api;

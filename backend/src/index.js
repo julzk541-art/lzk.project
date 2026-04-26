@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import ExcelJS from 'exceljs';
+import multer from 'multer';
 import { getDb } from './db.js';
 import { signToken, verifyToken, requireRole } from './auth.js';
 import { calcAutoTier } from './tier.js';
@@ -8,6 +9,7 @@ import { calcAutoTier } from './tier.js';
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
+const upload = multer({ storage: multer.memoryStorage() });
 
 function parseJsonField(v, fallback = []) {
   try {
@@ -267,9 +269,13 @@ app.post('/api/auth/parent-login', async (req, res) => {
 });
 
 app.post('/api/admin/login', async (req, res) => {
-  const { username, password } = req.body;
+  const { phone, name, password } = req.body;
+  if (!phone || !name || !password) return res.status(400).json({ message: '请填写手机号、姓名和密码' });
   const db = await getDb();
-  const admin = await db.get('SELECT * FROM admin_users WHERE username = ? AND password = ?', [username, password]);
+  const admin = await db.get(
+    'SELECT * FROM admin_users WHERE phone = ? AND display_name = ? AND password = ?',
+    [phone, name, password]
+  );
   if (!admin) return res.status(401).json({ message: '手机号、姓名或密码错误' });
 
   const token = signToken({ role: 'admin', adminId: admin.id, displayName: admin.display_name });
@@ -277,9 +283,12 @@ app.post('/api/admin/login', async (req, res) => {
 });
 
 app.post('/api/auth/admin-login', async (req, res) => {
-  const { username, password } = req.body;
+  const { phone, name, password } = req.body;
   const db = await getDb();
-  const admin = await db.get('SELECT * FROM admin_users WHERE username = ? AND password = ?', [username, password]);
+  const admin = await db.get(
+    'SELECT * FROM admin_users WHERE phone = ? AND display_name = ? AND password = ?',
+    [phone, name, password]
+  );
   if (!admin) return res.status(401).json({ message: '手机号、姓名或密码错误' });
 
   const token = signToken({ role: 'admin', adminId: admin.id, displayName: admin.display_name });
@@ -322,7 +331,8 @@ app.put('/api/parent/student', verifyToken, requireRole('parent'), async (req, r
 
 app.get('/api/admin/students', verifyToken, requireRole('admin'), async (req, res) => {
   const students = await listStudentsWithFilters(req.query);
-  res.json({ students, stats: calcStats(students) });
+  const parentUrl = process.env.PUBLIC_PARENT_URL || process.env.VITE_PUBLIC_PARENT_URL || 'http://localhost:5173';
+  res.json({ students, stats: calcStats(students), parentUrl });
 });
 
 app.get('/api/admin/students/:id', verifyToken, requireRole('admin'), async (req, res) => {
@@ -478,6 +488,229 @@ app.get('/api/admin/export', verifyToken, requireRole('admin'), async (req, res)
   res.setHeader('Content-Disposition', `attachment; filename="优秀生信息名单_${ymd}.xlsx"`);
   await workbook.xlsx.write(res);
   res.end();
+});
+
+app.get('/api/admin/import-template', verifyToken, requireRole('admin'), async (_, res) => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('导入模板');
+  sheet.columns = [
+    { header: '学生姓名', key: 'name', width: 14 },
+    { header: '手机号', key: 'phone', width: 14 },
+    { header: '性别', key: 'gender', width: 8 },
+    { header: '出生年月', key: 'birth_month', width: 12 },
+    { header: '就读学校', key: 'current_school', width: 16 },
+    { header: '班级', key: 'class_name', width: 12 },
+    { header: '总分', key: 'total_score', width: 10 },
+    { header: '年级排名', key: 'grade_rank', width: 10 },
+    { header: '班级排名', key: 'class_rank', width: 10 },
+    { header: '当前状态', key: 'profile_status', width: 12 },
+    { header: '分层等级', key: 'tier_level', width: 12 },
+    { header: '是否联系', key: 'is_contacted', width: 10 },
+    { header: '是否来校', key: 'is_visited', width: 10 },
+    { header: '负责人', key: 'owner_name', width: 12 },
+  ];
+  sheet.addRow({
+    name: '张三',
+    phone: '13800000000',
+    gender: '男',
+    current_school: '示例中学',
+    class_name: '初三(1)班',
+    total_score: 560,
+    grade_rank: 40,
+    class_rank: 2,
+    profile_status: '已提交',
+    tier_level: '一批预录',
+    is_contacted: '否',
+    is_visited: '否',
+    owner_name: '李兆康',
+  });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="优秀生导入模板.xlsx"');
+  await workbook.xlsx.write(res);
+  res.end();
+});
+
+const importMap = {
+  学生姓名: 'name',
+  手机号: 'phone',
+  性别: 'gender',
+  出生年月: 'birth_month',
+  就读学校: 'current_school',
+  班级: 'class_name',
+  学籍学校: 'enrollment_school',
+  户籍地址: 'hukou_address',
+  父亲姓名: 'father_name',
+  父亲电话: 'father_phone',
+  父亲单位及职务: 'father_job',
+  母亲姓名: 'mother_name',
+  母亲电话: 'mother_phone',
+  母亲单位及职务: 'mother_job',
+  最近一次考试名称: 'latest_exam_name',
+  总分: 'total_score',
+  年级排名: 'grade_rank',
+  班级排名: 'class_rank',
+  语文: 'chinese_score',
+  数学: 'math_score',
+  英语: 'english_score',
+  物理: 'physics_score',
+  化学: 'chemistry_score',
+  政治: 'politics_score',
+  历史: 'history_score',
+  地理: 'geography_score',
+  生物: 'biology_score',
+  竞赛经历: 'competitions',
+  荣誉奖励: 'honors',
+  班干部经历: 'class_roles',
+  学科优势: 'subject_strengths',
+  特长: 'specialties',
+  自我评价: 'self_evaluation',
+  阅读情况: 'reading_notes',
+  当前状态: 'profile_status',
+  分层等级: 'tier_level',
+  意向强度: 'intent_level',
+  家长态度: 'parent_attitude',
+  是否联系: 'is_contacted',
+  是否来校: 'is_visited',
+  来校时间: 'visit_time',
+  负责人: 'owner_name',
+  下次跟进时间: 'next_follow_up_time',
+  关键备注: 'key_notes',
+  风险点: 'risk_points',
+  推荐价值: 'recommendation_value',
+};
+
+app.post('/api/admin/import', verifyToken, requireRole('admin'), upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ message: '请上传 Excel 文件' });
+  const db = await getDb();
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(req.file.buffer);
+  const sheet = workbook.worksheets[0];
+  if (!sheet) return res.status(400).json({ message: '未读取到工作表' });
+
+  const headerRow = sheet.getRow(1).values;
+  const headers = headerRow.slice(1);
+  const keys = headers.map((h) => importMap[String(h || '').trim()] || null);
+
+  let inserted = 0;
+  let updated = 0;
+  const errors = [];
+
+  for (let i = 2; i <= sheet.rowCount; i += 1) {
+    const row = sheet.getRow(i);
+    const vals = row.values.slice(1);
+    if (!vals.some((v) => String(v || '').trim())) continue;
+
+    const data = {};
+    keys.forEach((key, idx) => {
+      if (!key) return;
+      data[key] = vals[idx];
+    });
+
+    const name = String(data.name || '').trim();
+    const phone = String(data.phone || '').trim();
+    if (!name || !phone) {
+      errors.push({ row: i, reason: '缺少学生姓名或手机号' });
+      continue;
+    }
+
+    try {
+      await db.run('INSERT OR IGNORE INTO parent_users (phone, student_name) VALUES (?, ?)', [phone, name]);
+      const parent = await db.get('SELECT * FROM parent_users WHERE phone = ? AND student_name = ?', [phone, name]);
+      const existing = await db.get('SELECT * FROM students WHERE parent_user_id = ?', [parent.id]);
+
+      const normalizedContact = toBool(data.is_contacted);
+      const normalizedVisit = toBool(data.is_visited);
+      const computedTier = data.tier_level || calcAutoTier(data);
+
+      if (existing) {
+        await db.run(
+          `UPDATE students SET
+            gender=?, birth_month=?, current_school=?, class_name=?, enrollment_school=?, hukou_address=?,
+            father_name=?, father_phone=?, father_job=?, mother_name=?, mother_phone=?, mother_job=?,
+            latest_exam_name=?, total_score=?, grade_rank=?, class_rank=?,
+            chinese_score=?, math_score=?, english_score=?, physics_score=?, chemistry_score=?, politics_score=?,
+            history_score=?, geography_score=?, biology_score=?, competitions=?, honors=?, class_roles=?, subject_strengths=?,
+            specialties=?, self_evaluation=?, reading_notes=?, profile_status=?, tier_level=?, intent_level=?, parent_attitude=?,
+            is_contacted=?, is_visited=?, visit_time=?, owner_name=?, next_follow_up_time=?, key_notes=?, risk_points=?, recommendation_value=?,
+            updated_at=CURRENT_TIMESTAMP
+          WHERE id=?`,
+          [
+            data.gender || existing.gender,
+            data.birth_month || existing.birth_month,
+            data.current_school || existing.current_school,
+            data.class_name || existing.class_name,
+            data.enrollment_school || existing.enrollment_school,
+            data.hukou_address || existing.hukou_address,
+            data.father_name || existing.father_name,
+            data.father_phone || existing.father_phone,
+            data.father_job || existing.father_job,
+            data.mother_name || existing.mother_name,
+            data.mother_phone || existing.mother_phone,
+            data.mother_job || existing.mother_job,
+            data.latest_exam_name || existing.latest_exam_name,
+            data.total_score ?? existing.total_score,
+            data.grade_rank ?? existing.grade_rank,
+            data.class_rank ?? existing.class_rank,
+            data.chinese_score ?? existing.chinese_score,
+            data.math_score ?? existing.math_score,
+            data.english_score ?? existing.english_score,
+            data.physics_score ?? existing.physics_score,
+            data.chemistry_score ?? existing.chemistry_score,
+            data.politics_score ?? existing.politics_score,
+            data.history_score ?? existing.history_score,
+            data.geography_score ?? existing.geography_score,
+            data.biology_score ?? existing.biology_score,
+            data.competitions ?? existing.competitions,
+            data.honors ?? existing.honors,
+            data.class_roles ?? existing.class_roles,
+            data.subject_strengths ?? existing.subject_strengths,
+            data.specialties ?? existing.specialties,
+            data.self_evaluation ?? existing.self_evaluation,
+            data.reading_notes ?? existing.reading_notes,
+            data.profile_status || existing.profile_status || '待完善',
+            computedTier || existing.tier_level,
+            data.intent_level || existing.intent_level,
+            data.parent_attitude || existing.parent_attitude,
+            normalizedContact ?? existing.is_contacted ?? 0,
+            normalizedVisit ?? existing.is_visited ?? 0,
+            data.visit_time || existing.visit_time,
+            data.owner_name || existing.owner_name,
+            data.next_follow_up_time || existing.next_follow_up_time,
+            data.key_notes || existing.key_notes,
+            data.risk_points || existing.risk_points,
+            data.recommendation_value || existing.recommendation_value,
+            existing.id,
+          ]
+        );
+        updated += 1;
+      } else {
+        await db.run(
+          `INSERT INTO students (
+            parent_user_id, name, gender, birth_month, current_school, class_name, enrollment_school, hukou_address,
+            father_name, father_phone, father_job, mother_name, mother_phone, mother_job,
+            latest_exam_name, total_score, grade_rank, class_rank, chinese_score, math_score, english_score, physics_score,
+            chemistry_score, politics_score, history_score, geography_score, biology_score, competitions, honors, class_roles,
+            subject_strengths, specialties, self_evaluation, reading_notes, profile_status, tier_level, intent_level, parent_attitude,
+            is_contacted, is_visited, visit_time, owner_name, next_follow_up_time, key_notes, risk_points, recommendation_value, is_submitted, submitted_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ?='已提交' THEN CURRENT_TIMESTAMP ELSE NULL END)`,
+          [
+            parent.id, name, data.gender || null, data.birth_month || null, data.current_school || null, data.class_name || null, data.enrollment_school || null, data.hukou_address || null,
+            data.father_name || null, data.father_phone || null, data.father_job || null, data.mother_name || null, data.mother_phone || null, data.mother_job || null,
+            data.latest_exam_name || null, data.total_score ?? null, data.grade_rank ?? null, data.class_rank ?? null, data.chinese_score ?? null, data.math_score ?? null, data.english_score ?? null, data.physics_score ?? null,
+            data.chemistry_score ?? null, data.politics_score ?? null, data.history_score ?? null, data.geography_score ?? null, data.biology_score ?? null, data.competitions ?? null, data.honors ?? null, data.class_roles ?? null,
+            data.subject_strengths ?? null, data.specialties ?? null, data.self_evaluation ?? null, data.reading_notes ?? null, data.profile_status || '待完善', computedTier || '待观察', data.intent_level || '未沟通', data.parent_attitude || '未沟通',
+            normalizedContact ?? 0, normalizedVisit ?? 0, data.visit_time || null, data.owner_name || null, data.next_follow_up_time || null, data.key_notes || null, data.risk_points || null, data.recommendation_value || null, data.profile_status === '已提交' ? 1 : 0, data.profile_status || '待完善',
+          ]
+        );
+        inserted += 1;
+      }
+    } catch (error) {
+      errors.push({ row: i, reason: error.message || '未知错误' });
+    }
+  }
+
+  res.json({ inserted, updated, failed: errors.length, errors });
 });
 
 const port = process.env.PORT || 4000;

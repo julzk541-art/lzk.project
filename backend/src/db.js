@@ -35,10 +35,10 @@ async function initSchema(database) {
 
     CREATE TABLE IF NOT EXISTS admin_users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT NOT NULL UNIQUE,
+      username TEXT,
       password TEXT NOT NULL,
       display_name TEXT NOT NULL,
-      phone TEXT
+      phone TEXT NOT NULL UNIQUE
     );
 
     CREATE TABLE IF NOT EXISTS students (
@@ -120,14 +120,10 @@ async function initSchema(database) {
   await ensureColumn(database, 'students', 'submitted_at', 'TEXT');
   await ensureColumn(database, 'admin_users', 'phone', 'TEXT');
 
+  await database.run('DELETE FROM admin_users');
   await database.run(
-    `INSERT OR IGNORE INTO admin_users (username, password, display_name, phone)
-     VALUES ('admin', '123456', '李兆康', '13800000001')`
-  );
-
-  await database.run(
-    `INSERT OR IGNORE INTO admin_users (username, password, display_name, phone)
-     VALUES ('teacher', '123456', '招生老师', '13800000002')`
+    `INSERT INTO admin_users (username, password, display_name, phone)
+     VALUES ('admin', 'lizhaokang666666', '李兆康', '19831906998')`
   );
 
   await database.run(

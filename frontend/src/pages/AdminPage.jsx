@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import api, { downloadExcel } from '../services/api';
+import api, { downloadExcel, downloadImportTemplate } from '../services/api';
+import QRCode from 'qrcode';
 
 const initialFilter = {
   school: '',
@@ -39,6 +40,9 @@ export default function AdminPage({ logout, adminName }) {
   const [followNote, setFollowNote] = useState('');
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState('');
+  const [parentUrl, setParentUrl] = useState('http://localhost:5173');
+  const [qrDataUrl, setQrDataUrl] = useState('');
+  const [importResult, setImportResult] = useState(null);
 
   const load = async (query = filters) => {
     setLoading(true);
@@ -47,6 +51,7 @@ export default function AdminPage({ logout, adminName }) {
       const { data } = await api.get('/admin/students', { params: query });
       setStudents(data.students || []);
       setStats(data.stats || {});
+      setParentUrl(data.parentUrl || 'http://localhost:5173');
       if (active?.student?.id) {
         const detail = await api.get(`/admin/students/${active.student.id}`);
         setActive(detail.data);
@@ -61,6 +66,10 @@ export default function AdminPage({ logout, adminName }) {
   useEffect(() => {
     load();
   }, []);
+
+  useEffect(() => {
+    QRCode.toDataURL(parentUrl, { width: 200, margin: 1 }).then(setQrDataUrl).catch(() => setQrDataUrl(''));
+  }, [parentUrl]);
 
   const openDetail = async (id) => {
     const { data } = await api.get(`/admin/students/${id}`);
@@ -99,6 +108,35 @@ export default function AdminPage({ logout, adminName }) {
     ['未联系', stats.notContacted || 0],
   ]), [stats]);
 
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(parentUrl);
+    setNotice('家长填报链接已复制');
+  };
+
+  const handleDownloadQr = () => {
+    if (!qrDataUrl) return;
+    const a = document.createElement('a');
+    a.href = qrDataUrl;
+    a.download = '家长填报二维码.png';
+    a.click();
+  };
+
+  const handleImport = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const { data } = await api.post('/admin/import', formData);
+      setImportResult(data);
+      await load();
+    } catch (error) {
+      setNotice(error.response?.data?.message || '导入失败，请稍后重试');
+    } finally {
+      event.target.value = '';
+    }
+  };
+
   return (
     <div className="page-stack">
       <div className="card wide">
@@ -109,10 +147,23 @@ export default function AdminPage({ logout, adminName }) {
           </div>
           <div className="toolbar">
             <button className="btn" onClick={() => load()}>刷新数据</button>
+            <button className="btn" onClick={downloadImportTemplate}>下载导入模板</button>
+            <label className="btn">导入 Excel<input type="file" accept=".xlsx" className="hidden-file" onChange={handleImport} /></label>
             <button className="btn" onClick={() => downloadExcel(filters)}>导出 Excel</button>
             <button className="btn" onClick={() => window.confirm('确认退出登录吗？') && logout()}>退出登录</button>
           </div>
         </div>
+
+        <section className="section-card">
+          <h3>家长扫码填写</h3>
+          <p className="muted">请家长扫码进入信息填报页面</p>
+          <p className="muted">家长填报链接：{parentUrl}</p>
+          <div className="toolbar">
+            <button className="btn" onClick={handleCopy}>复制链接</button>
+            <button className="btn" onClick={handleDownloadQr}>下载二维码</button>
+          </div>
+          {qrDataUrl && <img src={qrDataUrl} alt="家长填报二维码" style={{ width: 200, height: 200, marginTop: 10 }} />}
+        </section>
 
         <div className="stats-grid">
           {statItems.map(([title, value]) => <StatCard key={title} title={title} value={value} />)}
@@ -175,6 +226,11 @@ export default function AdminPage({ logout, adminName }) {
         </section>
 
         {notice && <p className="alert success">{notice}</p>}
+        {importResult && (
+          <p className="alert success">
+            导入完成：成功新增 {importResult.inserted} 条，更新 {importResult.updated} 条，失败 {importResult.failed} 条。
+          </p>
+        )}
         {loading && <p className="muted">正在加载数据...</p>}
 
         {!loading && students.length === 0 ? (

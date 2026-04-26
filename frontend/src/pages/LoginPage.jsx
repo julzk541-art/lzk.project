@@ -3,7 +3,7 @@ import api from '../services/api';
 
 export default function LoginPage({ mode, onLogin }) {
   const [parentForm, setParentForm] = useState({ phone: '', studentName: '' });
-  const [adminForm, setAdminForm] = useState({ username: 'admin', password: '123456' });
+  const [adminForm, setAdminForm] = useState({ phone: '19831906998', name: '李兆康', password: 'lizhaokang666666' });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -52,7 +52,8 @@ export default function LoginPage({ mode, onLogin }) {
           <p className="muted">仅限授权管理员访问</p>
           {error && <p className="alert error">{error}</p>}
           <form onSubmit={submitAdmin} className="form-grid">
-            <input placeholder="账号" value={adminForm.username} onChange={(e) => setAdminForm({ ...adminForm, username: e.target.value })} />
+            <input placeholder="手机号" value={adminForm.phone} onChange={(e) => setAdminForm({ ...adminForm, phone: e.target.value })} />
+            <input placeholder="姓名" value={adminForm.name} onChange={(e) => setAdminForm({ ...adminForm, name: e.target.value })} />
             <input type="password" placeholder="密码" value={adminForm.password} onChange={(e) => setAdminForm({ ...adminForm, password: e.target.value })} />
             <button type="submit" className="btn primary" disabled={loading}>{loading ? '正在登录...' : '登录后台'}</button>
           </form>
@@ -72,6 +73,9 @@ export default function LoginPage({ mode, onLogin }) {
           <input placeholder="学生姓名" value={parentForm.studentName} onChange={(e) => setParentForm({ ...parentForm, studentName: e.target.value })} />
           <button type="submit" className="btn primary" disabled={loading}>{loading ? '正在登录...' : '进入信息填报'}</button>
         </form>
+        <div className="toolbar" style={{ justifyContent: 'flex-end', marginTop: 6 }}>
+          <a className="text-link" href="/admin/login">后台管理员登录</a>
+        </div>
       </div>
     </div>
   );

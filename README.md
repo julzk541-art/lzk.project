@@ -86,8 +86,7 @@ npm run dev
 
 ## 测试账号（开箱即用）
 
-- 管理员：`admin / 123456`
-- 招生老师：`teacher / 123456`
+- 管理员（唯一）：手机号 `19831906998`，姓名 `李兆康`，密码 `lizhaokang666666`
 - 家长测试：手机号 `13800000000` + 学生姓名 `张三`
 
 ## Windows 一键启动（PowerShell）
@@ -123,6 +122,8 @@ powershell -ExecutionPolicy Bypass -File .\start-all.ps1 -SkipInstall
 - `PUT /api/admin/students/:id`
 - `POST /api/admin/students/:id/followups`
 - `GET /api/admin/export`
+- `POST /api/admin/import`
+- `GET /api/admin/import-template`
 
 ## 6. 后续扩展建议
 
