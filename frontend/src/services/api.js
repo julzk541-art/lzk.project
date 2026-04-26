@@ -10,4 +10,19 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+export async function downloadExcel(params) {
+  const response = await api.get('/admin/export', { params, responseType: 'blob' });
+  const disposition = response.headers['content-disposition'] || '';
+  const match = disposition.match(/filename="?([^";]+)"?/);
+  const fileName = match?.[1] || '优秀生信息名单.xlsx';
+
+  const blob = new Blob([response.data], { type: response.headers['content-type'] });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = decodeURIComponent(fileName);
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export default api;

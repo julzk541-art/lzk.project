@@ -26,51 +26,137 @@ function normalizeStudent(row) {
   };
 }
 
-app.get('/api/health', (_, res) => res.json({ ok: true }));
+function toBool(v) {
+  if (v === undefined || v === null || v === '') return null;
+  if (v === true || v === '1' || v === 1 || v === '是') return 1;
+  if (v === false || v === '0' || v === 0 || v === '否') return 0;
+  return null;
+}
 
-app.post('/api/auth/parent-login', async (req, res) => {
-  const { phone, studentName } = req.body;
-  if (!phone || !studentName) return res.status(400).json({ message: '请输入手机号和学生姓名' });
+function buildStudentWhere(query = {}) {
+  const {
+    school,
+    student_name,
+    phone,
+    profile_status,
+    tier_level,
+    is_contacted,
+    is_visited,
+    owner_name,
+    intent_level,
+    min_total_score,
+    max_total_score,
+    max_grade_rank,
+    max_class_rank,
+  } = query;
 
-  const db = await getDb();
-  await db.run(
-    'INSERT OR IGNORE INTO parent_users (phone, student_name) VALUES (?, ?)',
-    [phone, studentName]
-  );
-  const parent = await db.get('SELECT * FROM parent_users WHERE phone = ? AND student_name = ?', [phone, studentName]);
+  const where = [];
+  const params = [];
 
-  let student = await db.get('SELECT * FROM students WHERE parent_user_id = ?', [parent.id]);
-  if (!student) {
-    await db.run('INSERT INTO students (parent_user_id, name) VALUES (?, ?)', [parent.id, studentName]);
-    student = await db.get('SELECT * FROM students WHERE parent_user_id = ?', [parent.id]);
+  if (school) {
+    where.push('s.current_school LIKE ?');
+    params.push(`%${school}%`);
+  }
+  if (student_name) {
+    where.push('s.name LIKE ?');
+    params.push(`%${student_name}%`);
+  }
+  if (phone) {
+    where.push('p.phone LIKE ?');
+    params.push(`%${phone}%`);
+  }
+  if (profile_status) {
+    where.push('s.profile_status = ?');
+    params.push(profile_status);
+  }
+  if (tier_level) {
+    where.push('s.tier_level = ?');
+    params.push(tier_level);
+  }
+  if (intent_level) {
+    where.push('s.intent_level = ?');
+    params.push(intent_level);
+  }
+  if (owner_name) {
+    where.push('s.owner_name LIKE ?');
+    params.push(`%${owner_name}%`);
   }
 
-  const token = signToken({ role: 'parent', parentId: parent.id, studentId: student.id, name: parent.student_name });
-  res.json({ token, student: normalizeStudent(student) });
-});
+  const contacted = toBool(is_contacted);
+  if (contacted !== null) {
+    where.push('s.is_contacted = ?');
+    params.push(contacted);
+  }
 
-app.post('/api/auth/admin-login', async (req, res) => {
-  const { username, password } = req.body;
+  const visited = toBool(is_visited);
+  if (visited !== null) {
+    where.push('s.is_visited = ?');
+    params.push(visited);
+  }
+
+  if (min_total_score !== undefined && min_total_score !== '') {
+    where.push('CAST(COALESCE(s.total_score, 0) AS REAL) >= ?');
+    params.push(Number(min_total_score));
+  }
+  if (max_total_score !== undefined && max_total_score !== '') {
+    where.push('CAST(COALESCE(s.total_score, 0) AS REAL) <= ?');
+    params.push(Number(max_total_score));
+  }
+  if (max_grade_rank !== undefined && max_grade_rank !== '') {
+    where.push('CAST(COALESCE(s.grade_rank, 999999) AS INTEGER) <= ?');
+    params.push(Number(max_grade_rank));
+  }
+  if (max_class_rank !== undefined && max_class_rank !== '') {
+    where.push('CAST(COALESCE(s.class_rank, 999999) AS INTEGER) <= ?');
+    params.push(Number(max_class_rank));
+  }
+
+  return {
+    whereSql: where.length ? `WHERE ${where.join(' AND ')}` : '',
+    params,
+  };
+}
+
+async function listStudentsWithFilters(query) {
   const db = await getDb();
-  const admin = await db.get('SELECT * FROM admin_users WHERE username = ? AND password = ?', [username, password]);
-  if (!admin) return res.status(401).json({ message: '账号或密码错误' });
+  const { whereSql, params } = buildStudentWhere(query);
 
-  const token = signToken({ role: 'admin', adminId: admin.id, displayName: admin.display_name });
-  res.json({ token, displayName: admin.display_name });
-});
+  const rows = await db.all(
+    `SELECT s.*, p.phone FROM students s
+     JOIN parent_users p ON p.id = s.parent_user_id
+     ${whereSql}
+     ORDER BY datetime(s.updated_at) DESC`,
+    params
+  );
 
-app.get('/api/parent/student', verifyToken, requireRole('parent'), async (req, res) => {
+  return rows.map(normalizeStudent);
+}
+
+function calcStats(students) {
+  return {
+    total: students.length,
+    submitted: students.filter((s) => s.profile_status === '已提交').length,
+    pending: students.filter((s) => s.profile_status === '待完善').length,
+    contactedStatus: students.filter((s) => s.profile_status === '老师已联系').length,
+    elite: students.filter((s) => s.tier_level === '特优生').length,
+    firstBatch: students.filter((s) => s.tier_level === '一批预录').length,
+    secondBatch: students.filter((s) => s.tier_level === '二等预录').length,
+    watch: students.filter((s) => s.tier_level === '待观察').length,
+    contacted: students.filter((s) => Number(s.is_contacted) === 1).length,
+    notContacted: students.filter((s) => Number(s.is_contacted) !== 1).length,
+  };
+}
+
+async function upsertParentProfile(req, res, mode) {
   const db = await getDb();
-  const student = await db.get('SELECT * FROM students WHERE id = ? AND parent_user_id = ?', [req.user.studentId, req.user.parentId]);
-  res.json(normalizeStudent(student));
-});
+  const payload = req.body || {};
+  const current = await db.get('SELECT * FROM students WHERE id = ? AND parent_user_id = ?', [req.user.studentId, req.user.parentId]);
+  if (!current) return res.status(404).json({ message: '学生档案不存在' });
 
-app.put('/api/parent/student', verifyToken, requireRole('parent'), async (req, res) => {
-  const db = await getDb();
-  const payload = req.body;
+  const targetStatus = mode === 'submit' ? '已提交' : '待完善';
+  const isSubmitted = mode === 'submit' ? 1 : 0;
 
-  const autoTier = calcAutoTier(payload);
-  const current = await db.get('SELECT tier_level FROM students WHERE id = ?', [req.user.studentId]);
+  const tierLevel = Number(current.tier_manual_override) === 1 ? current.tier_level : calcAutoTier(payload);
 
   await db.run(
     `UPDATE students SET
@@ -80,68 +166,231 @@ app.put('/api/parent/student', verifyToken, requireRole('parent'), async (req, r
       chinese_score=?, math_score=?, english_score=?, physics_score=?, chemistry_score=?, politics_score=?,
       history_score=?, geography_score=?, biology_score=?,
       exam_history_json=?, competitions=?, honors=?, class_roles=?, subject_strengths=?, specialties=?,
-      self_evaluation=?, reading_notes=?, recommended_students_json=?, profile_status=?, is_submitted=?, contact_status=?,
+      self_evaluation=?, reading_notes=?, recommended_students_json=?,
+      profile_status=?, is_submitted=?, submitted_at=CASE WHEN ?=1 THEN CURRENT_TIMESTAMP ELSE submitted_at END,
       tier_level=?, updated_at=CURRENT_TIMESTAMP
     WHERE id=? AND parent_user_id=?`,
     [
-      payload.name, payload.gender, payload.birth_month, payload.current_school, payload.class_name, payload.enrollment_school, payload.hukou_address,
-      payload.father_name, payload.father_phone, payload.father_job, payload.mother_name, payload.mother_phone, payload.mother_job,
-      payload.latest_exam_name, payload.total_score, payload.grade_rank, payload.class_rank,
-      payload.chinese_score, payload.math_score, payload.english_score, payload.physics_score, payload.chemistry_score, payload.politics_score,
-      payload.history_score, payload.geography_score, payload.biology_score,
-      JSON.stringify(payload.exam_history || []), payload.competitions, payload.honors, payload.class_roles, payload.subject_strengths, payload.specialties,
-      payload.self_evaluation, payload.reading_notes, JSON.stringify(payload.recommended_students || []),
-      payload.profile_status || '待完善', payload.is_submitted ? 1 : 0, payload.contact_status || '未联系',
-      current?.tier_level || autoTier,
-      req.user.studentId, req.user.parentId,
+      payload.name || current.name,
+      payload.gender || null,
+      payload.birth_month || null,
+      payload.current_school || null,
+      payload.class_name || null,
+      payload.enrollment_school || null,
+      payload.hukou_address || null,
+      payload.father_name || null,
+      payload.father_phone || null,
+      payload.father_job || null,
+      payload.mother_name || null,
+      payload.mother_phone || null,
+      payload.mother_job || null,
+      payload.latest_exam_name || null,
+      payload.total_score !== '' ? payload.total_score : null,
+      payload.grade_rank !== '' ? payload.grade_rank : null,
+      payload.class_rank !== '' ? payload.class_rank : null,
+      payload.chinese_score !== '' ? payload.chinese_score : null,
+      payload.math_score !== '' ? payload.math_score : null,
+      payload.english_score !== '' ? payload.english_score : null,
+      payload.physics_score !== '' ? payload.physics_score : null,
+      payload.chemistry_score !== '' ? payload.chemistry_score : null,
+      payload.politics_score !== '' ? payload.politics_score : null,
+      payload.history_score !== '' ? payload.history_score : null,
+      payload.geography_score !== '' ? payload.geography_score : null,
+      payload.biology_score !== '' ? payload.biology_score : null,
+      JSON.stringify(Array.isArray(payload.exam_history) ? payload.exam_history : []),
+      payload.competitions || null,
+      payload.honors || null,
+      payload.class_roles || null,
+      payload.subject_strengths || null,
+      payload.specialties || null,
+      payload.self_evaluation || null,
+      payload.reading_notes || null,
+      JSON.stringify(Array.isArray(payload.recommended_students) ? payload.recommended_students : []),
+      targetStatus,
+      isSubmitted,
+      isSubmitted,
+      tierLevel,
+      req.user.studentId,
+      req.user.parentId,
     ]
   );
 
-  const updated = await db.get('SELECT * FROM students WHERE id = ?', [req.user.studentId]);
-  res.json(normalizeStudent(updated));
+  const updated = await db.get(
+    `SELECT s.*, p.phone FROM students s
+     JOIN parent_users p ON p.id = s.parent_user_id
+     WHERE s.id = ?`,
+    [req.user.studentId]
+  );
+
+  res.json({
+    message: mode === 'submit' ? '资料提交成功，后续可继续登录补充或修改。' : '草稿已保存，下次登录可继续修改。',
+    student: normalizeStudent(updated),
+  });
+}
+
+app.get('/api/health', (_, res) => res.json({ ok: true }));
+
+app.post('/api/parent/login', async (req, res) => {
+  const { phone, studentName } = req.body;
+  if (!phone || !studentName) return res.status(400).json({ message: '请输入手机号和学生姓名' });
+
+  const db = await getDb();
+  await db.run('INSERT OR IGNORE INTO parent_users (phone, student_name) VALUES (?, ?)', [phone, studentName]);
+  const parent = await db.get('SELECT * FROM parent_users WHERE phone = ? AND student_name = ?', [phone, studentName]);
+
+  let student = await db.get('SELECT * FROM students WHERE parent_user_id = ?', [parent.id]);
+  if (!student) {
+    await db.run('INSERT INTO students (parent_user_id, name, tier_level) VALUES (?, ?, ?)', [parent.id, studentName, '待观察']);
+    student = await db.get('SELECT * FROM students WHERE parent_user_id = ?', [parent.id]);
+  }
+
+  const token = signToken({ role: 'parent', parentId: parent.id, studentId: student.id, name: parent.student_name });
+  res.json({ token, student: normalizeStudent(student) });
+});
+
+app.post('/api/auth/parent-login', async (req, res) => {
+  const { phone, studentName } = req.body;
+  if (!phone || !studentName) return res.status(400).json({ message: '请输入手机号和学生姓名' });
+
+  const db = await getDb();
+  await db.run('INSERT OR IGNORE INTO parent_users (phone, student_name) VALUES (?, ?)', [phone, studentName]);
+  const parent = await db.get('SELECT * FROM parent_users WHERE phone = ? AND student_name = ?', [phone, studentName]);
+
+  let student = await db.get('SELECT * FROM students WHERE parent_user_id = ?', [parent.id]);
+  if (!student) {
+    await db.run('INSERT INTO students (parent_user_id, name, tier_level) VALUES (?, ?, ?)', [parent.id, studentName, '待观察']);
+    student = await db.get('SELECT * FROM students WHERE parent_user_id = ?', [parent.id]);
+  }
+
+  const token = signToken({ role: 'parent', parentId: parent.id, studentId: student.id, name: parent.student_name });
+  res.json({ token, student: normalizeStudent(student) });
+});
+
+app.post('/api/admin/login', async (req, res) => {
+  const { username, password } = req.body;
+  const db = await getDb();
+  const admin = await db.get('SELECT * FROM admin_users WHERE username = ? AND password = ?', [username, password]);
+  if (!admin) return res.status(401).json({ message: '手机号、姓名或密码错误' });
+
+  const token = signToken({ role: 'admin', adminId: admin.id, displayName: admin.display_name });
+  res.json({ token, displayName: admin.display_name });
+});
+
+app.post('/api/auth/admin-login', async (req, res) => {
+  const { username, password } = req.body;
+  const db = await getDb();
+  const admin = await db.get('SELECT * FROM admin_users WHERE username = ? AND password = ?', [username, password]);
+  if (!admin) return res.status(401).json({ message: '手机号、姓名或密码错误' });
+
+  const token = signToken({ role: 'admin', adminId: admin.id, displayName: admin.display_name });
+  res.json({ token, displayName: admin.display_name });
+});
+
+app.get('/api/parent/profile', verifyToken, requireRole('parent'), async (req, res) => {
+  const db = await getDb();
+  const student = await db.get(
+    `SELECT s.*, p.phone FROM students s
+     JOIN parent_users p ON p.id = s.parent_user_id
+     WHERE s.id = ? AND s.parent_user_id = ?`,
+    [req.user.studentId, req.user.parentId]
+  );
+  res.json(normalizeStudent(student));
+});
+
+app.put('/api/parent/profile/save-draft', verifyToken, requireRole('parent'), async (req, res) => {
+  await upsertParentProfile(req, res, 'draft');
+});
+
+app.put('/api/parent/profile/submit', verifyToken, requireRole('parent'), async (req, res) => {
+  await upsertParentProfile(req, res, 'submit');
+});
+
+app.get('/api/parent/student', verifyToken, requireRole('parent'), async (req, res) => {
+  const db = await getDb();
+  const student = await db.get(
+    `SELECT s.*, p.phone FROM students s
+     JOIN parent_users p ON p.id = s.parent_user_id
+     WHERE s.id = ? AND s.parent_user_id = ?`,
+    [req.user.studentId, req.user.parentId]
+  );
+  res.json(normalizeStudent(student));
+});
+
+app.put('/api/parent/student', verifyToken, requireRole('parent'), async (req, res) => {
+  await upsertParentProfile(req, res, req.body?.is_submitted ? 'submit' : 'draft');
 });
 
 app.get('/api/admin/students', verifyToken, requireRole('admin'), async (req, res) => {
-  const { school, tier_level, is_contacted, is_visited, owner_name, intent_level, min_total_score, max_total_score, max_grade_rank, max_class_rank } = req.query;
-  const db = await getDb();
-
-  const where = [];
-  const params = [];
-  if (school) { where.push('current_school = ?'); params.push(school); }
-  if (tier_level) { where.push('tier_level = ?'); params.push(tier_level); }
-  if (intent_level) { where.push('intent_level = ?'); params.push(intent_level); }
-  if (owner_name) { where.push('owner_name = ?'); params.push(owner_name); }
-  if (is_contacted !== undefined && is_contacted !== '') { where.push('is_contacted = ?'); params.push(Number(is_contacted)); }
-  if (is_visited !== undefined && is_visited !== '') { where.push('is_visited = ?'); params.push(Number(is_visited)); }
-  if (min_total_score) { where.push('total_score >= ?'); params.push(Number(min_total_score)); }
-  if (max_total_score) { where.push('total_score <= ?'); params.push(Number(max_total_score)); }
-  if (max_grade_rank) { where.push('grade_rank <= ?'); params.push(Number(max_grade_rank)); }
-  if (max_class_rank) { where.push('class_rank <= ?'); params.push(Number(max_class_rank)); }
-
-  const sql = `SELECT * FROM students ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY updated_at DESC`;
-  const rows = await db.all(sql, params);
-  res.json(rows.map(normalizeStudent));
+  const students = await listStudentsWithFilters(req.query);
+  res.json({ students, stats: calcStats(students) });
 });
 
 app.get('/api/admin/students/:id', verifyToken, requireRole('admin'), async (req, res) => {
   const db = await getDb();
-  const student = await db.get('SELECT * FROM students WHERE id = ?', [req.params.id]);
-  const followUps = await db.all('SELECT * FROM follow_up_records WHERE student_id = ? ORDER BY created_at DESC', [req.params.id]);
+  const student = await db.get(
+    `SELECT s.*, p.phone FROM students s
+     JOIN parent_users p ON p.id = s.parent_user_id
+     WHERE s.id = ?`,
+    [req.params.id]
+  );
+  if (!student) return res.status(404).json({ message: '学生不存在' });
+
+  const followUps = await db.all('SELECT * FROM follow_up_records WHERE student_id = ? ORDER BY datetime(created_at) DESC', [req.params.id]);
   res.json({ student: normalizeStudent(student), followUps });
 });
 
 app.put('/api/admin/students/:id', verifyToken, requireRole('admin'), async (req, res) => {
-  const allowed = ['tier_level', 'intent_level', 'parent_attitude', 'is_contacted', 'is_visited', 'visit_time', 'owner_name', 'next_follow_up_time', 'key_notes', 'risk_points', 'recommendation_value', 'contact_status'];
+  const db = await getDb();
+  const current = await db.get('SELECT * FROM students WHERE id = ?', [req.params.id]);
+  if (!current) return res.status(404).json({ message: '学生不存在' });
+
+  const allowed = [
+    'profile_status', 'tier_level', 'intent_level', 'parent_attitude', 'is_contacted', 'is_visited', 'visit_time',
+    'owner_name', 'next_follow_up_time', 'key_notes', 'risk_points', 'recommendation_value', 'contact_status',
+    'total_score', 'grade_rank', 'class_rank'
+  ];
+
   const entries = Object.entries(req.body).filter(([k]) => allowed.includes(k));
   if (!entries.length) return res.status(400).json({ message: '无可更新字段' });
 
-  const setSql = entries.map(([k]) => `${k} = ?`).join(', ');
   const values = entries.map(([, v]) => v);
 
-  const db = await getDb();
-  await db.run(`UPDATE students SET ${setSql}, updated_at=CURRENT_TIMESTAMP WHERE id = ?`, [...values, req.params.id]);
-  const student = await db.get('SELECT * FROM students WHERE id = ?', [req.params.id]);
+  let tierManualOverride = current.tier_manual_override;
+  if (Object.prototype.hasOwnProperty.call(req.body, 'tier_level')) {
+    tierManualOverride = 1;
+  } else if (
+    ['total_score', 'grade_rank', 'class_rank'].some((k) => Object.prototype.hasOwnProperty.call(req.body, k)) &&
+    Number(current.tier_manual_override) !== 1
+  ) {
+    const tier = calcAutoTier({ ...current, ...req.body });
+    entries.push(['tier_level', tier]);
+    values.push(tier);
+  }
+
+  const setSql = entries.map(([k]) => `${k} = ?`).join(', ');
+
+  await db.run(
+    `UPDATE students SET ${setSql}, tier_manual_override = ?, updated_at=CURRENT_TIMESTAMP WHERE id = ?`,
+    [...values, tierManualOverride, req.params.id]
+  );
+
+  const student = await db.get(
+    `SELECT s.*, p.phone FROM students s
+     JOIN parent_users p ON p.id = s.parent_user_id
+     WHERE s.id = ?`,
+    [req.params.id]
+  );
   res.json(normalizeStudent(student));
+});
+
+app.post('/api/admin/students/:id/followups', verifyToken, requireRole('admin'), async (req, res) => {
+  const { note } = req.body;
+  if (!note) return res.status(400).json({ message: '请输入跟进内容' });
+
+  const db = await getDb();
+  await db.run('INSERT INTO follow_up_records (student_id, note, created_by) VALUES (?, ?, ?)', [req.params.id, note, req.user.displayName]);
+  const list = await db.all('SELECT * FROM follow_up_records WHERE student_id = ? ORDER BY datetime(created_at) DESC', [req.params.id]);
+  res.json(list);
 });
 
 app.post('/api/admin/students/:id/follow-ups', verifyToken, requireRole('admin'), async (req, res) => {
@@ -150,34 +399,83 @@ app.post('/api/admin/students/:id/follow-ups', verifyToken, requireRole('admin')
 
   const db = await getDb();
   await db.run('INSERT INTO follow_up_records (student_id, note, created_by) VALUES (?, ?, ?)', [req.params.id, note, req.user.displayName]);
-  const list = await db.all('SELECT * FROM follow_up_records WHERE student_id = ? ORDER BY created_at DESC', [req.params.id]);
+  const list = await db.all('SELECT * FROM follow_up_records WHERE student_id = ? ORDER BY datetime(created_at) DESC', [req.params.id]);
   res.json(list);
 });
 
-app.get('/api/admin/export', verifyToken, requireRole('admin'), async (_, res) => {
-  const db = await getDb();
-  const rows = await db.all('SELECT * FROM students ORDER BY updated_at DESC');
+app.get('/api/admin/export', verifyToken, requireRole('admin'), async (req, res) => {
+  const rows = await listStudentsWithFilters(req.query);
 
   const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet('招生数据');
+  const sheet = workbook.addWorksheet('优秀生信息');
   sheet.columns = [
     { header: '学生姓名', key: 'name', width: 14 },
-    { header: '学校', key: 'current_school', width: 20 },
+    { header: '手机号', key: 'phone', width: 14 },
+    { header: '性别', key: 'gender', width: 8 },
+    { header: '出生年月', key: 'birth_month', width: 12 },
+    { header: '就读学校', key: 'current_school', width: 16 },
+    { header: '班级', key: 'class_name', width: 12 },
+    { header: '学籍学校', key: 'enrollment_school', width: 16 },
+    { header: '户籍地址', key: 'hukou_address', width: 24 },
+    { header: '父亲姓名', key: 'father_name', width: 12 },
+    { header: '父亲电话', key: 'father_phone', width: 14 },
+    { header: '父亲单位及职务', key: 'father_job', width: 20 },
+    { header: '母亲姓名', key: 'mother_name', width: 12 },
+    { header: '母亲电话', key: 'mother_phone', width: 14 },
+    { header: '母亲单位及职务', key: 'mother_job', width: 20 },
+    { header: '最近一次考试名称', key: 'latest_exam_name', width: 18 },
     { header: '总分', key: 'total_score', width: 10 },
     { header: '年级排名', key: 'grade_rank', width: 10 },
     { header: '班级排名', key: 'class_rank', width: 10 },
-    { header: '招生等级', key: 'tier_level', width: 12 },
+    { header: '语文', key: 'chinese_score', width: 8 },
+    { header: '数学', key: 'math_score', width: 8 },
+    { header: '英语', key: 'english_score', width: 8 },
+    { header: '物理', key: 'physics_score', width: 8 },
+    { header: '化学', key: 'chemistry_score', width: 8 },
+    { header: '政治', key: 'politics_score', width: 8 },
+    { header: '历史', key: 'history_score', width: 8 },
+    { header: '地理', key: 'geography_score', width: 8 },
+    { header: '生物', key: 'biology_score', width: 8 },
+    { header: '竞赛经历', key: 'competitions', width: 20 },
+    { header: '荣誉奖励', key: 'honors', width: 20 },
+    { header: '班干部经历', key: 'class_roles', width: 20 },
+    { header: '学科优势', key: 'subject_strengths', width: 20 },
+    { header: '特长', key: 'specialties', width: 20 },
+    { header: '自我评价', key: 'self_evaluation', width: 20 },
+    { header: '阅读情况', key: 'reading_notes', width: 20 },
+    { header: '推荐同学', key: 'recommended_students_text', width: 26 },
+    { header: '当前状态', key: 'profile_status', width: 12 },
+    { header: '分层等级', key: 'tier_level', width: 12 },
     { header: '意向强度', key: 'intent_level', width: 12 },
-    { header: '是否联系', key: 'is_contacted', width: 10 },
-    { header: '是否来校', key: 'is_visited', width: 10 },
+    { header: '家长态度', key: 'parent_attitude', width: 12 },
+    { header: '是否联系', key: 'is_contacted_text', width: 10 },
+    { header: '是否来校', key: 'is_visited_text', width: 10 },
+    { header: '来校时间', key: 'visit_time', width: 14 },
     { header: '负责人', key: 'owner_name', width: 12 },
-    { header: '关键备注', key: 'key_notes', width: 30 },
+    { header: '下次跟进时间', key: 'next_follow_up_time', width: 16 },
+    { header: '关键备注', key: 'key_notes', width: 24 },
+    { header: '风险点', key: 'risk_points', width: 24 },
+    { header: '推荐价值', key: 'recommendation_value', width: 14 },
+    { header: '提交时间', key: 'submitted_at', width: 16 },
+    { header: '更新时间', key: 'updated_at', width: 16 },
   ];
 
-  rows.forEach((row) => sheet.addRow(row));
+  rows.forEach((row) => {
+    sheet.addRow({
+      ...row,
+      recommended_students_text: Array.isArray(row.recommended_students)
+        ? row.recommended_students.map((r) => `${r.name || ''}${r.phone ? `(${r.phone})` : ''}`).join('；')
+        : '',
+      is_contacted_text: Number(row.is_contacted) === 1 ? '是' : '否',
+      is_visited_text: Number(row.is_visited) === 1 ? '是' : '否',
+    });
+  });
+
+  const date = new Date();
+  const ymd = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', 'attachment; filename="admission_students.xlsx"');
+  res.setHeader('Content-Disposition', `attachment; filename="优秀生信息名单_${ymd}.xlsx"`);
   await workbook.xlsx.write(res);
   res.end();
 });

@@ -14,6 +14,13 @@ export async function getDb() {
   return db;
 }
 
+async function ensureColumn(database, table, column, definition) {
+  const cols = await database.all(`PRAGMA table_info(${table})`);
+  if (!cols.some((c) => c.name === column)) {
+    await database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
 async function initSchema(database) {
   await database.exec(`
     PRAGMA foreign_keys = ON;
@@ -30,7 +37,8 @@ async function initSchema(database) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT NOT NULL UNIQUE,
       password TEXT NOT NULL,
-      display_name TEXT NOT NULL
+      display_name TEXT NOT NULL,
+      phone TEXT
     );
 
     CREATE TABLE IF NOT EXISTS students (
@@ -77,9 +85,11 @@ async function initSchema(database) {
 
       profile_status TEXT DEFAULT '待完善',
       is_submitted INTEGER DEFAULT 0,
+      submitted_at TEXT,
       contact_status TEXT DEFAULT '未联系',
 
       tier_level TEXT,
+      tier_manual_override INTEGER DEFAULT 0,
       intent_level TEXT DEFAULT '未沟通',
       parent_attitude TEXT DEFAULT '未沟通',
       is_contacted INTEGER DEFAULT 0,
@@ -106,14 +116,18 @@ async function initSchema(database) {
     );
   `);
 
+  await ensureColumn(database, 'students', 'tier_manual_override', 'INTEGER DEFAULT 0');
+  await ensureColumn(database, 'students', 'submitted_at', 'TEXT');
+  await ensureColumn(database, 'admin_users', 'phone', 'TEXT');
+
   await database.run(
-    `INSERT OR IGNORE INTO admin_users (username, password, display_name)
-     VALUES ('admin', '123456', '招生管理员')`
+    `INSERT OR IGNORE INTO admin_users (username, password, display_name, phone)
+     VALUES ('admin', '123456', '李兆康', '13800000001')`
   );
 
   await database.run(
-    `INSERT OR IGNORE INTO admin_users (username, password, display_name)
-     VALUES ('teacher', '123456', '招生老师')`
+    `INSERT OR IGNORE INTO admin_users (username, password, display_name, phone)
+     VALUES ('teacher', '123456', '招生老师', '13800000002')`
   );
 
   await database.run(
@@ -128,8 +142,8 @@ async function initSchema(database) {
   if (parent) {
     await database.run(
       `INSERT OR IGNORE INTO students (
-        id, parent_user_id, name, current_school, class_name, profile_status, is_submitted
-      ) VALUES (1, ?, '张三', '示例中学', '初三(1)班', '待完善', 0)`,
+        id, parent_user_id, name, current_school, class_name, profile_status, is_submitted, tier_level
+      ) VALUES (1, ?, '张三', '示例中学', '初三(1)班', '待完善', 0, '待观察')`,
       [parent.id]
     );
   }

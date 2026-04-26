@@ -3,18 +3,24 @@ import ParentPage from './pages/ParentPage';
 import AdminPage from './pages/AdminPage';
 import LoginPage from './pages/LoginPage';
 
+function getPageMode() {
+  return window.location.pathname.startsWith('/admin') ? 'admin' : 'parent';
+}
+
 export default function App() {
-  const [mode, setMode] = useState('parent');
+  const [mode] = useState(getPageMode());
   const [session, setSession] = useState(() => {
     const token = localStorage.getItem('token');
     const role = localStorage.getItem('role');
-    return token && role ? { token, role } : null;
+    const displayName = localStorage.getItem('displayName');
+    return token && role ? { token, role, displayName } : null;
   });
 
-  const onLogin = (token, role) => {
+  const onLogin = (token, role, displayName) => {
     localStorage.setItem('token', token);
     localStorage.setItem('role', role);
-    setSession({ token, role });
+    if (displayName) localStorage.setItem('displayName', displayName);
+    setSession({ token, role, displayName });
   };
 
   const logout = () => {
@@ -23,10 +29,10 @@ export default function App() {
   };
 
   const content = useMemo(() => {
-    if (!session) return <LoginPage mode={mode} setMode={setMode} onLogin={onLogin} />;
+    if (!session) return <LoginPage mode={mode} onLogin={onLogin} />;
     if (session.role === 'parent') return <ParentPage logout={logout} />;
-    return <AdminPage logout={logout} />;
+    return <AdminPage logout={logout} adminName={session.displayName || '管理员'} />;
   }, [session, mode]);
 
-  return <div className="container">{content}</div>;
+  return <div className="app-container">{content}</div>;
 }

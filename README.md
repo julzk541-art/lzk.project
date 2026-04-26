@@ -64,6 +64,10 @@ lzk.project/
 
 ## 4. 本地运行步骤
 
+### 4.0 环境建议
+- Node.js 推荐 `20.x LTS`（`sqlite3` 在 Node 24 下可能触发本地编译失败）
+- Windows PowerShell 如遇脚本限制，请使用 `npm.cmd`
+
 ### 4.1 启动后端
 ```bash
 cd backend
@@ -106,14 +110,18 @@ powershell -ExecutionPolicy Bypass -File .\start-all.ps1 -SkipInstall
 
 ## 5. API 概览
 
-- `POST /api/auth/parent-login`
-- `POST /api/auth/admin-login`
-- `GET /api/parent/student`
-- `PUT /api/parent/student`
+家长端：
+- `POST /api/parent/login`
+- `GET /api/parent/profile`
+- `PUT /api/parent/profile/save-draft`
+- `PUT /api/parent/profile/submit`
+
+后台端：
+- `POST /api/admin/login`
 - `GET /api/admin/students`
 - `GET /api/admin/students/:id`
 - `PUT /api/admin/students/:id`
-- `POST /api/admin/students/:id/follow-ups`
+- `POST /api/admin/students/:id/followups`
 - `GET /api/admin/export`
 
 ## 6. 后续扩展建议
